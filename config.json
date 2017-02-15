@@ -1,0 +1,6 @@
+{
+  "as_uri" : "https://127.0.0.1:8443",
+  "first_kms" : "ws://10.2.175.105:8888/kurento",
+  "second_kms" : "ws://10.2.175.101:8888/kurento",
+  "streams_per_viewer" : 50
+}
