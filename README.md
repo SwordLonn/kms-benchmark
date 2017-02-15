@@ -17,5 +17,7 @@ npm install
 and then edit config.json, set your kurento servers
 
 ```bash
-nodejs benchmark.js
+nodejs server.js
 ```
+
+open config.as_uri at your browser and test it!
