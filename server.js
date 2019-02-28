@@ -16,222 +16,223 @@
 var path = require('path');
 var url = require('url');
 var express = require('express');
-var minimist = require('minimist');
 var ws = require('ws');
 var kurento = require('kurento-client');
 var fs = require('fs');
 var https = require('https');
+var url = require('url');
+var ExtendOptions = require('rloud-utils').sdphelper.ExtendOptions;
 var config = JSON.parse(fs.readFileSync('config.json'));
 
-var KmsManager = require('./tree/kmsmanager.js')
-var TreeManager = require('./tree/treemanager.js')
+var Helper = require('./clienthelper');
+
+var helper = new Helper();
 
 var app = express();
+var first = helper.get(config.first_ms).createPipeline();
+var second_ms = helper.get(config.second_ms);
 
-var kmsManager = new KmsManager(config.first_kms, config.second_kms);
-var treeManager = new TreeManager(kmsManager);
-var tree = treeManager.createTree('main', 'benchmark', config.streams_per_viewer);
 /*
  * Definition of global variables.
  */
+
 var idCounter = 0;
-var candidatesQueue = {};
-var kurentoClient = null;
-var presenter = null;
-var viewers = [];
 var noPresenterMessage = 'No active presenter. Try again later...';
 
 /*
  * Server startup
  */
 var options = {
-    key: fs.readFileSync("keys/server.key"),
-    cert: fs.readFileSync("keys/server.crt")
+  key: fs.readFileSync('keys/server.key'),
+  cert: fs.readFileSync('keys/server.crt')
 };
 
 var asUrl = url.parse(config.as_uri);
 var port = asUrl.port;
 var apps = app;
-if(asUrl.protocol == 'https:'){
+if (asUrl.protocol == 'https:') {
   apps = https.createServer(options, app);
 }
 var server = apps.listen(port, function() {
-    console.log("kms-benchmark started");
-    console.log("Open " + url.format(asUrl) + " with a WebRTC capable browser");
+  console.log('ms-benchmark started');
+  console.log('Open ' + url.format(asUrl) + ' with a WebRTC capable browser');
 });
 
 var wss = new ws.Server({
-    server : server,
-    path : '/live'
+  server: server,
+  path: '/live'
 });
 
 function nextUniqueId() {
-	idCounter++;
-	return idCounter.toString();
+  idCounter++;
+  return idCounter.toString();
 }
 
 /*
  * Management of WebSocket messages
  */
 wss.on('connection', function(ws) {
+  var sessionId = nextUniqueId();
+  console.log('Connection received with sessionId ' + sessionId);
 
-	var sessionId = nextUniqueId();
-	console.log('Connection received with sessionId ' + sessionId);
+  ws.on('error', function(error) {
+    console.log('Connection ' + sessionId + ' error');
+    stop(sessionId);
+  });
 
-    ws.on('error', function(error) {
-        console.log('Connection ' + sessionId + ' error');
+  ws.on('close', function() {
+    console.log('Connection ' + sessionId + ' closed');
+    stop(sessionId);
+  });
+
+  ws.on('message', function(_message) {
+    var message = JSON.parse(_message);
+    console.log('Connection ' + sessionId + ' received message ', message);
+
+    switch (message.id) {
+      case 'presenter':
+        startPresenter(sessionId, ws, message.sdpOffer, function(
+          error,
+          sdpAnswer
+        ) {
+          if (error) {
+            console.log(error);
+            return ws.send(
+              JSON.stringify({
+                id: 'presenterResponse',
+                response: 'rejected',
+                message: error
+              })
+            );
+          }
+          ws.send(
+            JSON.stringify({
+              id: 'presenterResponse',
+              response: 'accepted',
+              sdpAnswer: sdpAnswer
+            })
+          );
+        });
+        break;
+
+      case 'viewer':
+        startViewer(sessionId, ws, message.sdpOffer, function(
+          error,
+          sdpAnswer
+        ) {
+          if (error) {
+            console.log(error);
+            return ws.send(
+              JSON.stringify({
+                id: 'viewerResponse',
+                response: 'rejected',
+                message: error
+              })
+            );
+          }
+
+          ws.send(
+            JSON.stringify({
+              id: 'viewerResponse',
+              response: 'accepted',
+              sdpAnswer: sdpAnswer
+            })
+          );
+        });
+        break;
+
+      case 'stop':
         stop(sessionId);
-    });
+        break;
 
-    ws.on('close', function() {
-        console.log('Connection ' + sessionId + ' closed');
-        stop(sessionId);
-    });
+      case 'onIceCandidate':
+        onIceCandidate(sessionId, message.candidate);
+        break;
 
-    ws.on('message', function(_message) {
-        var message = JSON.parse(_message);
-        console.log('Connection ' + sessionId + ' received message ', message);
-
-        switch (message.id) {
-        case 'presenter':
-			startPresenter(sessionId, ws, message.sdpOffer, function(error, sdpAnswer) {
-				if (error) {
-                    console.log(error);
-					return ws.send(JSON.stringify({
-						id : 'presenterResponse',
-						response : 'rejected',
-						message : error
-					}));
-				}
-				ws.send(JSON.stringify({
-					id : 'presenterResponse',
-					response : 'accepted',
-					sdpAnswer : sdpAnswer
-				}));
-			});
-			break;
-
-        case 'viewer':
-			startViewer(sessionId, ws, message.sdpOffer, function(error, sdpAnswer) {
-				if (error) {
-                    console.log(error);
-					return ws.send(JSON.stringify({
-						id : 'viewerResponse',
-						response : 'rejected',
-						message : error
-					}));
-				}
-
-				ws.send(JSON.stringify({
-					id : 'viewerResponse',
-					response : 'accepted',
-					sdpAnswer : sdpAnswer
-				}));
-			});
-			break;
-
-        case 'stop':
-            stop(sessionId);
-            break;
-
-        case 'onIceCandidate':
-            onIceCandidate(sessionId, message.candidate);
-            break;
-
-        default:
-            ws.send(JSON.stringify({
-                id : 'error',
-                message : 'Invalid message ' + message
-            }));
-            break;
-        }
-    });
+      default:
+        ws.send(
+          JSON.stringify({
+            id: 'error',
+            message: 'Invalid message ' + message
+          })
+        );
+        break;
+    }
+  });
 });
 
-var sessions = {};
-var endpoints = {};
-var caches = {};
-var source = null;
+let presenter = {};
+let viewers = {};
+let endpoints = {};
+let total = 0;
 
-function gotIceCandidate(label, candidate){
-    console.log(candidate);
-    var s = sessions[label];
-    var candidate = kurento.register.complexTypes.IceCandidate(candidate);
-    s.send(JSON.stringify({
-            id : 'iceCandidate',
-            candidate : candidate
-        }));
+function gotIceCandidate(label, candidate) {
+  console.log(candidate);
+  var s = sessions[label];
+  var candidate = kurento.register.complexTypes.IceCandidate(candidate);
+  s.send(
+    JSON.stringify({
+      id: 'iceCandidate',
+      candidate: candidate
+    })
+  );
 }
 
+function startPresenter(sessionId, ws, sdpOffer, callback) {
+  let webrtc = first.createWebRtc();
+  let pass = first.getSource();
+  webrtc.connect(pass);
 
-function startPresenter(sessionId, ws, sdpOffer, callback){
-    tree.setTreeSource(gotIceCandidate, sdpOffer).then(function(res){
-            console.log(res.answer);
-            console.log(res.id);
-            sessions[res.id] = ws;
-            endpoints[sessionId] = res.id;
-            var candidates = caches[sessionId];
-            if(candidates){
-                for(var i in candidates){
-                    tree.addIceCandidate(res.id, candidates[i]);
-                }
-                delete caches[sessionId];
-            }
-            source = sessionId;
-            callback(null, res.answer);
-        }).catch(function(error){
-            callback(error);
-        });
+  webrtc.processSdpOffer(sdpOffer).then(answer => {
+    callback(null, answer);
+  });
+  presenter.webrtc = webrtc;
+  endpoints[sessionId] = presenter;
 }
 
-function startViewer(sessionId, ws, sdpOffer, callback){
-    tree.addTreeSink(gotIceCandidate, sdpOffer).then(function(res){
-            console.log(res.answer);
-            console.log(res.id);
-            sessions[res.id] = ws;
-            endpoints[sessionId] = res.id;
-            var candidates = caches[sessionId];
-            if(candidates){
-                for(var i in candidates){
-                    tree.addIceCandidate(res.id, candidates[i]);
-                }
-                delete caches[sessionId];
-            }
-            callback(null, res.answer);
-        }).catch(function(error){
-            callback(error);
-        });
+function startViewer(sessionId, ws, sdpOffer, callback) {
+  if (!presenter.webrtc) {
+    callback(noPresenterMessage);
+    return;
+  }
+  let second = second_ms.createPipeline();
+  let webrtc = second.createWebRtc();
+  second.getSource().connect(webrtc);
+  webrtc.processSdpOffer(sdpOffer).then(answer => {
+    callback(null, answer);
+  });
+  viewers[sessionId] = viewers[sessionId] || {};
+  viewers[sessionId].second = second;
+  viewers[sessionId].webrtc = webrtc;
+
+  endpoints = viewers[sessionId];
+
+  let params = ExtendOptions({}, sdpOffer);
+  first.link(second, params).then(plumbers => {
+    first.getSource().connect(plumbers[0]);
+    plumbers[1].connect(second.getSource());
+  });
+
+  total += 1;
+  for (let i = 0; i < config.streams_per_viewer; ++i) {
+    setTimeout(() => {
+      total += 1;
+      console.log('connecting ' + total + ' links ');
+      first.link(second, params).then(plumbers => {
+        first.getSource().connect(plumbers[0]);
+      });
+    }, i * 500);
+  }
 }
 
-function stop(sessionId)
-{
-        if(source == sessionId){
-            tree.removeTreeSource();
-        }else{
-            var id = endpoints[sessionId];
-            if(id)
-                tree.removeTreeSink(id);
-        }
-        var id = endpoints[sessionId];
-        if(id){
-            delete endpoints[sessionId];
-            delete caches[sessionId];
-            delete sessions[id];
-        }
-}
+function stop(sessionId) {}
 
-function onIceCandidate(sessionId, _candidate){
-    var pointid = endpoints[sessionId];
-    var candidate = kurento.register.complexTypes.IceCandidate(_candidate);
-    if(pointid){
-        tree.addIceCandidate(endpoints[sessionId], candidate);
-    }else{
-        if(!caches[sessionId])
-            caches[sessionId] = new Array();
-        caches[sessionId].push(candidate);
-    }
+function onIceCandidate(sessionId, _candidate) {
+  //   let candidate = kurento.register.complexTypes.IceCandidate(_candidate);
+  //   let point = endpoints[sessionId];
+  //   if (point && point.webrtc) {
+  //     point.webrtc.adddIceCandidate(candidate);
+  //   }
 }
 
 app.use(express.static(path.join(__dirname, 'static')));
-
-
